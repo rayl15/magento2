@@ -1,0 +1,104 @@
+#!/bin/bash
+
+JQ=$(which jq)
+AWK=$(which awk)
+SED=$(which sed)
+DATE=$(which date)
+CURL=$(which curl)
+SCRIPTNAME=$(basename $0)
+# script conf file. Set here the full path like "/etc/nrd/nrd.conf"
+SCRIPTCONFFILE="nrd.conf"
+
+#[ Functions ]----------------------------------------------------------------------------------------------#
+
+exiterrorfunc(){
+	# Generic output function, show the message given,
+	# and then exits with the given code.
+
+	# Parse message and exit code
+	EXITCODE=$(echo $@ | $AWK '{print $NF}')
+	EXITMESSAGE=$(echo $@ | $AWK '{ $NF = ""; print $0}')
+	echo "[ $($DATE +%m/%d/%Y\ %H:%M:%S) ] - $EXITMESSAGE"
+	exit $EXITCODE
+}
+
+usage(){
+	echo "
+	usage:
+	$SCRIPTNAME -a <app> -c <changelog> -d <description> -r <revision> -u <user>
+
+	app: App Name (duh)
+	changelog: file added, file changed, file removed, etc
+	description: quick description about some new behavior or so
+	revision: Revision Number
+	user: User who made the deploy
+
+	Notice: Remember to use quotation marks in changelog and description, you know, for best practices
+
+	Example:
+	$SCRIPTNAME -a myapp -c \"Added: index.php, Removed: None\" -d \"Index Added for the new site\" -r \"001\" -u \"developer@example.com\"
+	"
+	exiterrorfunc "Invalide Arguments given 1"
+}
+
+getIdByName(){
+	APP_NAME_TEST=$($CURL -s -X GET 'https://api.newrelic.com/v2/applications.json' -H "X-Api-Key:${API_KEY}" | $JQ '.applications[].name' | $SED 's/"//g' | $SED "/^$APP_NAME$/!d")
+
+	if [[ $APP_NAME_TEST != "" ]]; then
+		APP_ID=$($CURL -s -X GET 'https://api.newrelic.com/v2/applications.json' -H "X-Api-Key:${API_KEY}" -d "filter[name]=$APP_NAME" | $JQ '.applications[0].id')
+	fi
+
+	if [[ $APP_ID ]]; then
+		return $APP_ID
+	else
+		return 0
+	fi
+}
+
+recordDeployment(){
+	$CURL -X POST "https://api.newrelic.com/v2/applications/${APP_ID}/deployments.json" \
+	     -H "X-Api-Key:${API_KEY}" -i -H "Content-Type: application/json" \
+	     -d "{ \"deployment\": { \"revision\": \"$DEPLOY_REVISION\", \"changelog\": \"$DEPLOY_CHANGELOG\", \"description\": \"$DEPLOY_DESCRIPTION\", \"user\": \"$DEPLOY_USER\" } }"
+	if [[ $? -eq 0 ]]; then
+		exiterrorfunc "Deploy was marked successfully 0"
+	else
+		exiterrorfunc "Something went wrong, see NewRelic Status in https://status.newrelic.com/ 1"
+	fi
+}
+
+executionFlow(){
+	getIdByName $APP_NAME
+	if [[ $APP_ID -ne 0 ]]; then
+		recordDeployment $APP_ID $DEPLOY_CHANGELOG $DEPLOY_DESCRIPTION $DEPLOY_REVISION $DEPLOY_USER
+	else
+		exiterrorfunc "Something went wrong, invalid App Name: $APP_NAME 1"
+	fi
+}
+
+#[ Load conf file ]-----------------------------------------------------------------------------------------#
+
+if [ -e $SCRIPTCONFFILE ] ; then
+        source $SCRIPTCONFFILE
+else
+        exiterrorfunc "ERROR: $SCRIPTCONFFILE file not found 1"
+fi
+
+[[ $API_KEY ]] || exiterrorfunc "API_KEY not found in $SCRIPTCONFFILE 1"
+[[ $JQ ]] || exiterrorfunc "Unable to find 'jq' command, please install it in https://stedolan.github.io/jq/ 1"
+
+#[ Load commandline options ]-------------------------------------------------------------------------------#
+
+[[ $# -ne 10 ]] && usage
+
+while getopts "a:c:d:r:u:" opts ; do
+	case $opts in
+		a) APP_NAME=$OPTARG ;;
+		c) DEPLOY_CHANGELOG=$OPTARG ;;
+		d) DEPLOY_DESCRIPTION=$OPTARG ;;
+		r) DEPLOY_REVISION=$OPTARG ;;
+		u) DEPLOY_USER=$OPTARG ;;
+		*) exiterrorfunc "Something went wrong, use a valid argument 1" ;;
+	esac
+done
+
+executionFlow $@
